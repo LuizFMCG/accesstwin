@@ -4,16 +4,16 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
+    "build": "vinext build",
+    "build:next": "next build",
+    "start": "vinext start",
     "lint": "eslint .",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "next typegen && tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "check": "npm run lint && npm run typecheck && npm run test && npm run build"
+    "check": "npm run lint && npm run typecheck && npm run test && npm run build:next && npm run build"
   },
   "dependencies": {
-    "next": "16.2.11",
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "zod": "^4.3.6"
@@ -23,13 +23,20 @@
     "@types/node": "^24.10.1",
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.0",
+    "@vitejs/plugin-rsc": "^0.5.26",
     "eslint": "^9.39.1",
     "eslint-config-next": "16.2.11",
+    "next": "16.2.11",
+    "react-server-dom-webpack": "19.2.8",
     "typescript": "5.9.3",
+    "vinext": "1.0.0-beta.3",
+    "vite": "8.1.5",
     "vitest": "^4.0.15"
   },
   "packageManager": "npm@11.9.0",
   "engines": {
     "node": ">=20.9"
-  }
+  },
+  "type": "module"
 }

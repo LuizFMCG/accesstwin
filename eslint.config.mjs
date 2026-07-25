@@ -7,6 +7,7 @@ export default defineConfig([
   ...nextTypescript,
   globalIgnores([
     ".next/**",
+    "dist/**",
     "coverage/**",
     "next-env.d.ts"
   ])
