@@ -13,6 +13,31 @@ import type {
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
+type CachedAnalysis = {
+  expiresAt: number;
+  payload: Record<string, unknown>;
+};
+
+type RateWindow = {
+  count: number;
+  resetsAt: number;
+};
+
+const runtimeState = globalThis as typeof globalThis & {
+  __accessTwinAnalysisCache?: Map<string, CachedAnalysis>;
+  __accessTwinRateWindows?: Map<string, RateWindow>;
+};
+
+const analysisCache =
+  runtimeState.__accessTwinAnalysisCache ??
+  (runtimeState.__accessTwinAnalysisCache = new Map());
+const rateWindows =
+  runtimeState.__accessTwinRateWindows ??
+  (runtimeState.__accessTwinRateWindows = new Map());
+const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const RATE_WINDOW_MS = 10 * 60 * 1000;
+const RATE_LIMIT = 12;
+
 const requestSchema = z
   .object({
     origin: z.object({
@@ -78,10 +103,40 @@ function toUiCategories(counts: readonly CategoryCount[]) {
   }));
 }
 
-function responseHeaders() {
+function responseHeaders(cacheStatus = "BYPASS") {
   return {
     "Cache-Control": "no-store, max-age=0",
+    "X-AccessTwin-Cache": cacheStatus,
   };
+}
+
+function analysisCacheKey(input: z.infer<typeof requestSchema>) {
+  const location = input.origin.placeId
+    ? `place:${input.origin.placeId}`
+    : `point:${input.origin.latitude.toFixed(5)},${input.origin.longitude.toFixed(5)}`;
+  return `${location}:${input.travelMode}:${input.durationMinutes}`;
+}
+
+function requestClientId(request: Request) {
+  return (
+    request.headers.get("cf-connecting-ip") ??
+    request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ??
+    "anonymous"
+  );
+}
+
+function consumeRateLimit(clientId: string) {
+  const now = Date.now();
+  const current = rateWindows.get(clientId);
+  if (!current || current.resetsAt <= now) {
+    rateWindows.set(clientId, { count: 1, resetsAt: now + RATE_WINDOW_MS });
+    return { allowed: true, remaining: RATE_LIMIT - 1 };
+  }
+  if (current.count >= RATE_LIMIT) {
+    return { allowed: false, remaining: 0 };
+  }
+  current.count += 1;
+  return { allowed: true, remaining: RATE_LIMIT - current.count };
 }
 
 function publicGoogleError(error: GoogleMapsApiError) {
@@ -170,6 +225,34 @@ export async function POST(request: Request) {
     );
   }
 
+  const cacheKey = analysisCacheKey(input);
+  const cached = analysisCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return NextResponse.json(cached.payload, {
+      headers: responseHeaders("HIT"),
+    });
+  }
+  if (cached) analysisCache.delete(cacheKey);
+
+  const rate = consumeRateLimit(requestClientId(request));
+  if (!rate.allowed) {
+    return NextResponse.json(
+      {
+        error:
+          "O limite de proteção foi atingido. Aguarde até 10 minutos antes de iniciar outra busca ao vivo.",
+      },
+      {
+        status: 429,
+        headers: {
+          ...responseHeaders(),
+          "Retry-After": "600",
+          "X-RateLimit-Limit": String(RATE_LIMIT),
+          "X-RateLimit-Remaining": "0",
+        },
+      },
+    );
+  }
+
   try {
     const signal = AbortSignal.timeout(45_000);
     const result = await analyzeOrigin(
@@ -188,27 +271,36 @@ export async function POST(request: Request) {
     const areaKm2 = geometryAreaKm2(result.isochrone);
     const categories = toUiCategories(result.counts);
 
-    return NextResponse.json(
-      {
-        origin,
-        durationMinutes: input.durationMinutes,
-        travelMode,
-        polygon: result.isochrone,
-        categories,
-        total: result.totalCount,
-        areaKm2,
-        density: areaKm2 > 0 ? result.totalCount / areaKm2 : 0,
-        source: "google",
-        warnings: result.geometryWarnings.map((warning) => warning.message),
-        generatedAt: new Date().toISOString(),
-        taxonomyVersion: "2026-07-20",
-        categoryDefinitions: categories.map((category) => ({
-          id: category.id,
-          label: CATEGORY_BY_ID[category.id].description,
-        })),
+    const payload = {
+      origin,
+      durationMinutes: input.durationMinutes,
+      travelMode,
+      polygon: result.isochrone,
+      categories,
+      total: result.totalCount,
+      areaKm2,
+      density: areaKm2 > 0 ? result.totalCount / areaKm2 : 0,
+      source: "google",
+      warnings: result.geometryWarnings.map((warning) => warning.message),
+      generatedAt: new Date().toISOString(),
+      taxonomyVersion: "2026-07-20",
+      categoryDefinitions: categories.map((category) => ({
+        id: category.id,
+        label: CATEGORY_BY_ID[category.id].description,
+      })),
+    };
+    analysisCache.set(cacheKey, {
+      payload,
+      expiresAt: Date.now() + CACHE_TTL_MS,
+    });
+
+    return NextResponse.json(payload, {
+      headers: {
+        ...responseHeaders("MISS"),
+        "X-RateLimit-Limit": String(RATE_LIMIT),
+        "X-RateLimit-Remaining": String(rate.remaining),
       },
-      { headers: responseHeaders() },
-    );
+    });
   } catch (error) {
     if (error instanceof GoogleMapsApiError) {
       const publicError = publicGoogleError(error);

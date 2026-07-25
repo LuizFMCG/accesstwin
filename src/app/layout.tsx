@@ -2,9 +2,9 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "AccessTwin — compare o que uma cidade coloca ao seu alcance",
+  title: "AccessTwin — encontre os gêmeos urbanos de um território",
   description:
-    "Compare a composição de lugares alcançáveis a partir de dois pontos usando isócronas e similaridade Jensen–Shannon.",
+    "Escolha um território e descubra automaticamente as áreas com o cotidiano mais parecido usando isócronas e similaridade Jensen–Shannon.",
 };
 
 export default function RootLayout({
