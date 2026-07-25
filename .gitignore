@@ -9,6 +9,7 @@
 *.tsbuildinfo
 next-env.d.ts
 .vercel
+/.wrangler/
 .env*
 !.env.example
 npm-debug.log*

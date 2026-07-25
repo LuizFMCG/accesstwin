@@ -7,7 +7,7 @@
     "build": "vinext build",
     "postbuild": "node scripts/copy-hosting-config.mjs",
     "build:next": "next build",
-    "start": "vinext start",
+    "start": "wrangler dev --config dist/server/wrangler.json",
     "lint": "eslint .",
     "typecheck": "next typegen && tsc --noEmit",
     "test": "vitest run",
@@ -15,11 +15,13 @@
     "check": "npm run lint && npm run typecheck && npm run test && npm run build:next && npm run build"
   },
   "dependencies": {
+    "@vinext/cloudflare": "1.0.0-beta.3",
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@cloudflare/vite-plugin": "1.47.0",
     "@types/google.maps": "^3.58.1",
     "@types/node": "^24.10.1",
     "@types/react": "^19.2.7",
@@ -33,11 +35,12 @@
     "typescript": "5.9.3",
     "vinext": "1.0.0-beta.3",
     "vite": "8.1.5",
-    "vitest": "^4.0.15"
+    "vitest": "^4.0.15",
+    "wrangler": "4.114.0"
   },
   "packageManager": "npm@11.9.0",
   "engines": {
-    "node": ">=20.9"
+    "node": ">=22.0"
   },
   "type": "module"
 }
