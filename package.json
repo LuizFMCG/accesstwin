@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "vinext build",
+    "postbuild": "node scripts/copy-hosting-config.mjs",
     "build:next": "next build",
     "start": "vinext start",
     "lint": "eslint .",
