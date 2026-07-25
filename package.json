@@ -1,0 +1,35 @@
+{
+  "name": "@accesstwin/web",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "check": "npm run lint && npm run typecheck && npm run test && npm run build"
+  },
+  "dependencies": {
+    "next": "16.2.11",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/google.maps": "^3.58.1",
+    "@types/node": "^24.10.1",
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "eslint": "^9.39.1",
+    "eslint-config-next": "16.2.11",
+    "typescript": "5.9.3",
+    "vitest": "^4.0.15"
+  },
+  "packageManager": "npm@11.9.0",
+  "engines": {
+    "node": ">=20.9"
+  }
+}
