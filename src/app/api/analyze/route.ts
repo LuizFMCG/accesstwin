@@ -23,9 +23,15 @@ type RateWindow = {
   resetsAt: number;
 };
 
+type DailyUsage = {
+  day: string;
+  count: number;
+};
+
 const runtimeState = globalThis as typeof globalThis & {
   __accessTwinAnalysisCache?: Map<string, CachedAnalysis>;
   __accessTwinRateWindows?: Map<string, RateWindow>;
+  __accessTwinDailyUsage?: DailyUsage;
 };
 
 const analysisCache =
@@ -34,9 +40,20 @@ const analysisCache =
 const rateWindows =
   runtimeState.__accessTwinRateWindows ??
   (runtimeState.__accessTwinRateWindows = new Map());
-const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const cacheTtlHours = Math.min(
+  168,
+  Math.max(1, Number(process.env.ACCESSTWIN_CACHE_TTL_HOURS ?? 24)),
+);
+const CACHE_TTL_MS = cacheTtlHours * 60 * 60 * 1000;
 const RATE_WINDOW_MS = 10 * 60 * 1000;
-const RATE_LIMIT = 12;
+const RATE_LIMIT = Math.min(
+  60,
+  Math.max(1, Number(process.env.ACCESSTWIN_RATE_LIMIT ?? 12)),
+);
+const DAILY_LIMIT = Math.min(
+  10_000,
+  Math.max(1, Number(process.env.ACCESSTWIN_DAILY_ANALYSIS_LIMIT ?? 100)),
+);
 
 const requestSchema = z
   .object({
@@ -139,6 +156,20 @@ function consumeRateLimit(clientId: string) {
   return { allowed: true, remaining: RATE_LIMIT - current.count };
 }
 
+function consumeDailyBudget() {
+  const day = new Date().toISOString().slice(0, 10);
+  const current = runtimeState.__accessTwinDailyUsage;
+  if (!current || current.day !== day) {
+    runtimeState.__accessTwinDailyUsage = { day, count: 1 };
+    return { allowed: true, remaining: DAILY_LIMIT - 1 };
+  }
+  if (current.count >= DAILY_LIMIT) {
+    return { allowed: false, remaining: 0 };
+  }
+  current.count += 1;
+  return { allowed: true, remaining: DAILY_LIMIT - current.count };
+}
+
 function publicGoogleError(error: GoogleMapsApiError) {
   if (error.httpStatus === 429) {
     return {
@@ -215,6 +246,17 @@ export async function POST(request: Request) {
   }
 
   const apiKey = process.env.GOOGLE_MAPS_SERVER_API_KEY?.trim();
+  const liveEnabled =
+    process.env.ACCESSTWIN_LIVE_ENABLED?.trim().toLowerCase() !== "false";
+  if (!liveEnabled) {
+    return NextResponse.json(
+      {
+        error:
+          "A análise ao vivo está temporariamente desativada pelo controle de orçamento.",
+      },
+      { status: 503, headers: responseHeaders() },
+    );
+  }
   if (!apiKey) {
     return NextResponse.json(
       {
@@ -248,6 +290,25 @@ export async function POST(request: Request) {
           "Retry-After": "600",
           "X-RateLimit-Limit": String(RATE_LIMIT),
           "X-RateLimit-Remaining": "0",
+        },
+      },
+    );
+  }
+
+  const dailyBudget = consumeDailyBudget();
+  if (!dailyBudget.allowed) {
+    return NextResponse.json(
+      {
+        error:
+          "O orçamento diário de análises ao vivo foi atingido. O índice sem custo continua disponível.",
+      },
+      {
+        status: 429,
+        headers: {
+          ...responseHeaders(),
+          "Retry-After": "86400",
+          "X-AccessTwin-Daily-Limit": String(DAILY_LIMIT),
+          "X-AccessTwin-Daily-Remaining": "0",
         },
       },
     );
@@ -299,6 +360,8 @@ export async function POST(request: Request) {
         ...responseHeaders("MISS"),
         "X-RateLimit-Limit": String(RATE_LIMIT),
         "X-RateLimit-Remaining": String(rate.remaining),
+        "X-AccessTwin-Daily-Limit": String(DAILY_LIMIT),
+        "X-AccessTwin-Daily-Remaining": String(dailyBudget.remaining),
       },
     });
   } catch (error) {

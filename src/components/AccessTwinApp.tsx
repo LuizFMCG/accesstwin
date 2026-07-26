@@ -2,9 +2,14 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CATEGORIES, CATEGORY_BY_ID } from "@/lib/categories";
-import { demoAreaKm2, demoCounts, demoGeometry } from "@/lib/demo";
 import { loadGoogleMaps } from "@/lib/google-browser";
 import { rankProfiles, type RankedProfile } from "@/lib/ranking";
+import {
+  buildDemoTerritorialIndex,
+  searchTerritorialIndex,
+  TERRITORIAL_INDEX_VERSION,
+  type TerritorialSearchResult,
+} from "@/lib/territorial-index";
 import {
   TERRITORIES,
   territoriesInScope,
@@ -34,16 +39,17 @@ type Analysis = {
   generatedAt: string;
 };
 
-type TerritoryProfile = {
+type LiveProfile = {
   id: string;
   territory: Territory;
-  analysis: Analysis;
   counts: Partial<Record<CategoryId, number>>;
   total: number;
   density: number;
+  analysis: Analysis;
 };
 
-type RankedTerritory = RankedProfile<TerritoryProfile>;
+type LiveRanked = RankedProfile<LiveProfile>;
+type ResultItem = TerritorialSearchResult | LiveRanked;
 
 const MODE_LABELS: Record<TravelMode, string> = {
   WALK: "A pé",
@@ -54,8 +60,14 @@ const MODE_LABELS: Record<TravelMode, string> = {
 const SCOPE_LABELS: Record<SearchScope, { label: string; hint: string }> = {
   state: { label: "Estado", hint: "mesma UF" },
   country: { label: "País", hint: "mesmo país" },
-  region: { label: "Região", hint: "Brasil + vizinhos" },
+  region: { label: "Cone Sul", hint: "Brasil + vizinhos" },
 };
+
+const CONFIDENCE_LABELS = {
+  NORMAL: "base consistente",
+  LOW_BASE: "base pequena",
+  INSUFFICIENT_BASE: "base insuficiente",
+} as const;
 
 const numberFormat = new Intl.NumberFormat("pt-BR", {
   maximumFractionDigits: 1,
@@ -65,47 +77,6 @@ function countsRecord(categories: readonly CategoryCount[]) {
   return Object.fromEntries(
     categories.map((category) => [category.id, category.count]),
   ) as Partial<Record<CategoryId, number>>;
-}
-
-function demoAnalysis(
-  territory: Territory,
-  durationMinutes: number,
-  travelMode: TravelMode,
-): Analysis {
-  const rawCounts = demoCounts(territory, durationMinutes, travelMode);
-  const byId = new Map(rawCounts.map((item) => [item.categoryId, item.count]));
-  const categories = CATEGORIES.map((category) => ({
-    id: category.id,
-    label: category.label,
-    color: category.color,
-    count: byId.get(category.id) ?? 0,
-  }));
-  const total = categories.reduce((sum, category) => sum + category.count, 0);
-  const areaKm2 = demoAreaKm2(durationMinutes, travelMode);
-  return {
-    origin: territory,
-    durationMinutes,
-    travelMode,
-    polygon: demoGeometry(territory, durationMinutes, travelMode),
-    categories,
-    total,
-    areaKm2,
-    density: areaKm2 > 0 ? total / areaKm2 : 0,
-    source: "demo",
-    warnings: ["Índice demonstrativo; não representa medição real do território."],
-    generatedAt: "demo",
-  };
-}
-
-function toProfile(territory: Territory, analysis: Analysis): TerritoryProfile {
-  return {
-    id: territory.id,
-    territory,
-    analysis,
-    counts: countsRecord(analysis.categories),
-    total: analysis.total,
-    density: analysis.density,
-  };
 }
 
 async function requestAnalysis(
@@ -142,7 +113,9 @@ function safeErrorMessage(error: unknown) {
 
 function geoDistance(a: Origin, b: Origin) {
   const lat = a.latitude - b.latitude;
-  const lon = (a.longitude - b.longitude) * Math.cos((a.latitude * Math.PI) / 180);
+  const lon =
+    (a.longitude - b.longitude) *
+    Math.cos((a.latitude * Math.PI) / 180);
   return Math.hypot(lat, lon);
 }
 
@@ -237,11 +210,10 @@ function LivePlaceSearch({
 
 function BrandMark() {
   return (
-    <svg aria-hidden="true" className="brand-symbol" viewBox="0 0 42 42">
-      <path d="M5 21c4-9 9-13 16-13 7 0 12 4 16 13-4 9-9 13-16 13C14 34 9 30 5 21Z" />
-      <circle cx="21" cy="21" r="5" />
-      <path d="M21 4v8M21 30v8M4 21h8M30 21h8" />
-    </svg>
+    <span className="brand-mark" aria-hidden="true">
+      <i />
+      <i />
+    </span>
   );
 }
 
@@ -272,82 +244,72 @@ function ScopeControl({
   );
 }
 
-function ProfileBars({
+function mapPosition(territory: Territory) {
+  const x = ((territory.longitude + 75) / 22) * 100;
+  const y = ((-territory.latitude - 3) / 33) * 100;
+  return {
+    left: `${Math.min(96, Math.max(4, x))}%`,
+    top: `${Math.min(94, Math.max(6, y))}%`,
+  };
+}
+
+function TerritoryMap({
   reference,
-  twin,
+  results,
+  selectedId,
+  onSelect,
 }: {
-  reference: TerritoryProfile;
-  twin: RankedTerritory;
+  reference: Territory;
+  results: readonly ResultItem[];
+  selectedId?: string;
+  onSelect: (id: string) => void;
 }) {
   return (
-    <div className="profile-bars">
-      {CATEGORIES.map((category) => {
-        const referenceCount = reference.counts[category.id] ?? 0;
-        const twinCount = twin.counts[category.id] ?? 0;
-        const referenceShare = reference.total
-          ? (referenceCount / reference.total) * 100
-          : 0;
-        const twinShare = twin.total ? (twinCount / twin.total) * 100 : 0;
-        return (
-          <div className="profile-line" key={category.id}>
-            <span>{category.shortLabel}</span>
-            <div>
-              <i
-                className="profile-line__reference"
-                style={{ width: `${referenceShare}%` }}
-              />
-              <i
-                className="profile-line__twin"
-                style={{ width: `${twinShare}%` }}
-              />
-            </div>
-            <small>{numberFormat.format(referenceShare)} · {numberFormat.format(twinShare)}%</small>
-          </div>
-        );
-      })}
+    <div className="territory-map" aria-label="Mapa esquemático dos resultados">
+      <div className="map-grid" aria-hidden="true" />
+      <span className="map-label map-label--north">N</span>
+      <span className="map-label map-label--ocean">ATLÂNTICO</span>
+      {results.slice(0, 8).map((result, index) => (
+        <button
+          aria-label={`Abrir ${result.territory.label}`}
+          className={`map-node ${
+            selectedId === result.id ? "is-selected" : ""
+          }`}
+          key={result.id}
+          onClick={() => onSelect(result.id)}
+          style={mapPosition(result.territory)}
+          type="button"
+        >
+          {index + 1}
+        </button>
+      ))}
+      <span
+        className="map-node map-node--reference"
+        style={mapPosition(reference)}
+      >
+        R
+      </span>
+      <div className="map-legend">
+        <span><i className="legend-reference" /> referência</span>
+        <span><i className="legend-twin" /> gêmeos</span>
+      </div>
     </div>
   );
 }
 
-function ResultCard({
-  result,
-  selected,
-  onSelect,
-}: {
-  result: RankedTerritory;
-  selected: boolean;
-  onSelect: () => void;
-}) {
-  const driver = result.leadingDriver
-    ? CATEGORY_BY_ID[result.leadingDriver].shortLabel
-    : "mix urbano";
-  return (
-    <button
-      className={`rank-card ${selected ? "is-selected" : ""}`}
-      onClick={onSelect}
-      type="button"
-    >
-      <span className="rank-card__rank">
-        {String(result.rank).padStart(2, "0")}
-      </span>
-      <span className="rank-card__place">
-        <strong>{result.territory.label}</strong>
-        <small>
-          {result.territory.city} · {result.territory.state}
-        </small>
-      </span>
-      <span className="rank-card__context">{result.territory.context}</span>
-      <span className="rank-card__score">
-        <strong>{Math.round(result.similarity)}</strong>
-        <small>afinidade JS</small>
-      </span>
-      <span className="rank-card__arrow">↗</span>
-      <span className="rank-card__driver">maior diferença: {driver}</span>
-    </button>
+function profileShare(
+  counts: Partial<Record<CategoryId, number>>,
+  id: CategoryId,
+) {
+  const total = CATEGORIES.reduce(
+    (sum, category) => sum + (counts[category.id] ?? 0),
+    0,
   );
+  return total === 0 ? 0 : ((counts[id] ?? 0) / total) * 100;
 }
 
 export function AccessTwinApp() {
+  const [dataMode, setDataMode] = useState<"demo" | "live">("demo");
   const [referenceTerritory, setReferenceTerritory] = useState<Territory>(
     TERRITORIES[0],
   );
@@ -357,13 +319,9 @@ export function AccessTwinApp() {
   const [scope, setScope] = useState<SearchScope>("country");
   const [travelMode, setTravelMode] = useState<TravelMode>("WALK");
   const [durationMinutes, setDurationMinutes] = useState(15);
-  const [dataMode, setDataMode] = useState<"demo" | "live">("demo");
   const [browserKey, setBrowserKey] = useState<string>();
-  const [keyConfigured, setKeyConfigured] = useState<boolean>();
-  const [liveResult, setLiveResult] = useState<{
-    reference: TerritoryProfile;
-    ranked: RankedTerritory[];
-  }>();
+  const [liveResults, setLiveResults] = useState<LiveRanked[]>([]);
+  const [liveReference, setLiveReference] = useState<LiveProfile>();
   const [selectedId, setSelectedId] = useState<string>();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string>();
@@ -371,134 +329,153 @@ export function AccessTwinApp() {
   useEffect(() => {
     void fetch("/api/config", { cache: "no-store" })
       .then((response) => response.json())
-      .then((config: { browserKeyConfigured: boolean; browserKey?: string }) => {
-        setKeyConfigured(config.browserKeyConfigured);
-        setBrowserKey(config.browserKey);
-      })
-      .catch(() => setKeyConfigured(false));
+      .then((config: { browserKey?: string }) =>
+        setBrowserKey(config.browserKey),
+      )
+      .catch(() => setBrowserKey(undefined));
   }, []);
 
-  const candidates = useMemo(
-    () => territoriesInScope(referenceTerritory, scope),
-    [referenceTerritory, scope],
+  const demoIndex = useMemo(
+    () => buildDemoTerritorialIndex(durationMinutes, travelMode),
+    [durationMinutes, travelMode],
   );
+  const demoReference =
+    demoIndex.find((profile) => profile.id === referenceTerritory.id) ??
+    demoIndex[0];
+  const demoResults = useMemo(
+    () => searchTerritorialIndex(demoReference, demoIndex, scope),
+    [demoIndex, demoReference, scope],
+  );
+  const activeResults: readonly ResultItem[] =
+    dataMode === "demo" ? demoResults : liveResults;
+  const activeReference =
+    dataMode === "demo" ? demoReference : liveReference;
+  const selected =
+    activeResults.find((result) => result.id === selectedId) ??
+    activeResults[0];
 
-  const demoResult = useMemo(() => {
-    const reference = toProfile(
-      referenceTerritory,
-      demoAnalysis(referenceTerritory, durationMinutes, travelMode),
-    );
-    const profiles = candidates.map((territory) =>
-      toProfile(
-        territory,
-        demoAnalysis(territory, durationMinutes, travelMode),
-      ),
-    );
-    return { reference, ranked: rankProfiles(reference, profiles) };
-  }, [candidates, durationMinutes, referenceTerritory, travelMode]);
-
-  const activeResult =
-    dataMode === "live" && liveResult ? liveResult : demoResult;
-  const selectedTwin =
-    activeResult.ranked.find((result) => result.id === selectedId) ??
-    activeResult.ranked[0];
-
-  const stateCount = TERRITORIES.filter(
-    (territory) =>
-      territory.id !== referenceTerritory.id &&
-      territory.country === referenceTerritory.country &&
-      territory.state === referenceTerritory.state,
-  ).length;
+  const candidates = territoriesInScope(referenceTerritory, scope);
   const shortlist = liveShortlist(referenceOrigin, candidates);
+  const stateCount = territoriesInScope(referenceTerritory, "state").length;
   const liveProfileCount = 1 + shortlist.length;
   const liveAggregateCalls = liveProfileCount * CATEGORIES.length;
 
-  const chooseTerritory = useCallback((territory: Territory) => {
+  const changeReference = useCallback((territory: Territory) => {
     setReferenceTerritory(territory);
     setReferenceOrigin(territory);
-    setLiveResult(undefined);
+    setLiveResults([]);
+    setLiveReference(undefined);
+    setError(undefined);
   }, []);
 
-  const runLiveRanking = useCallback(async () => {
+  async function runLiveRanking() {
+    if (shortlist.length === 0 || loading) return;
     setLoading(true);
     setError(undefined);
     try {
-      const candidateSet = liveShortlist(referenceOrigin, candidates);
-      const [referenceAnalysis, ...candidateAnalyses] = await Promise.all([
-        requestAnalysis(referenceOrigin, durationMinutes, travelMode),
-        ...candidateSet.map((territory) =>
-          requestAnalysis(territory, durationMinutes, travelMode),
-        ),
-      ]);
-      const reference = toProfile(
-        {
+      const referenceAnalysis = await requestAnalysis(
+        referenceOrigin,
+        durationMinutes,
+        travelMode,
+      );
+      const candidateAnalyses = await Promise.all(
+        shortlist.map(async (territory) => ({
+          territory,
+          analysis: await requestAnalysis(
+            territory,
+            durationMinutes,
+            travelMode,
+          ),
+        })),
+      );
+      const referenceProfile: LiveProfile = {
+        id: "live-reference",
+        territory: {
           ...referenceTerritory,
           ...referenceOrigin,
           id: "live-reference",
           context: "referência escolhida ao vivo",
         },
-        referenceAnalysis,
+        analysis: referenceAnalysis,
+        counts: countsRecord(referenceAnalysis.categories),
+        total: referenceAnalysis.total,
+        density: referenceAnalysis.density,
+      };
+      const ranked = rankProfiles(
+        referenceProfile,
+        candidateAnalyses.map(({ territory, analysis }) => ({
+          id: territory.id,
+          territory,
+          analysis,
+          counts: countsRecord(analysis.categories),
+          total: analysis.total,
+          density: analysis.density,
+        })),
       );
-      const profiles = candidateSet.map((territory, index) =>
-        toProfile(territory, candidateAnalyses[index]),
-      );
-      setLiveResult({ reference, ranked: rankProfiles(reference, profiles) });
+      setLiveReference(referenceProfile);
+      setLiveResults(ranked);
+      setSelectedId(ranked[0]?.id);
+      document.querySelector("#resultados")?.scrollIntoView({
+        behavior: "smooth",
+      });
     } catch (caught) {
       setError(safeErrorMessage(caught));
     } finally {
       setLoading(false);
     }
-  }, [
-    candidates,
-    durationMinutes,
-    referenceOrigin,
-    referenceTerritory,
-    travelMode,
-  ]);
+  }
+
+  const referenceCounts = activeReference?.counts ?? {};
+  const selectedSimilarity =
+    selected && "similarity" in selected ? selected.similarity : 0;
+  const selectedScale =
+    selected && "scaleSimilarity" in selected ? selected.scaleSimilarity : 0;
 
   return (
     <main id="top">
       <header className="site-header">
-        <a className="brand" href="#top">
+        <a className="brand" href="#top" aria-label="AccessTwin, início">
           <BrandMark />
           <span>
             <strong>AccessTwin</strong>
-            <small>urban affinity engine</small>
+            <small>atlas de afinidades urbanas</small>
           </span>
         </a>
         <nav>
-          <a href="#buscar">Encontrar gêmeos</a>
+          <a href="#buscar">Explorar</a>
+          <a href="#resultados">Resultados</a>
           <a href="#metodo">Método</a>
-          <span className="beta-pill">beta 01</span>
+          <span className="beta-pill">índice piloto</span>
         </nav>
       </header>
 
       <section className="hero">
-        <div className="hero__copy">
-          <span className="kicker">Inteligência territorial comparada</span>
+        <div className="hero-stamp">
+          <span>AT / 01</span>
+          <span>PORTO ALEGRE — CONE SUL</span>
+        </div>
+        <div className="hero-copy">
+          <p className="eyebrow">Geografia comparável, sem palpite de IA</p>
           <h1>
-            Escolha um lugar.
-            <br />
-            <em>Descubra seus gêmeos.</em>
+            Um lugar pode ter um <em>irmão</em> longe daqui.
           </h1>
           <p>
-            O AccessTwin lê a composição do cotidiano ao alcance e procura,
-            automaticamente, os territórios que mais se parecem com a sua
-            referência — no estado, no país ou na região.
+            Escolha uma área. O AccessTwin lê a composição do cotidiano e
+            procura, em todo o índice, os territórios que funcionam de modo
+            mais parecido.
           </p>
           <a className="hero-cta" href="#buscar">
-            Explorar afinidades <span>↓</span>
+            Encontrar gêmeos <span>↘</span>
           </a>
         </div>
-        <div className="hero__visual" aria-hidden="true">
-          <span className="signal signal--one" />
-          <span className="signal signal--two" />
-          <span className="signal signal--three" />
-          <span className="node node--origin">REF</span>
-          <span className="node node--a">01</span>
-          <span className="node node--b">02</span>
-          <span className="node node--c">03</span>
-          <span className="visual-caption">similaridade não é proximidade</span>
+        <div className="hero-field" aria-hidden="true">
+          <div className="field-orbit field-orbit--a" />
+          <div className="field-orbit field-orbit--b" />
+          <span className="field-point field-point--origin">R</span>
+          <span className="field-point field-point--one">01</span>
+          <span className="field-point field-point--two">02</span>
+          <span className="field-point field-point--three">03</span>
+          <p>uma assinatura urbana<br />múltiplas correspondências</p>
         </div>
       </section>
 
@@ -508,21 +485,21 @@ export function AccessTwinApp() {
             <span className="section-index">01 / REFERÊNCIA</span>
             <h2>De onde partimos?</h2>
           </div>
-          <div className="mode-switch">
+          <div className="mode-switch" aria-label="Fonte dos dados">
             <button
               className={dataMode === "demo" ? "is-active" : ""}
               onClick={() => setDataMode("demo")}
               type="button"
             >
-              Explorar sem custo
+              Índice sem custo
             </button>
             <button
               className={dataMode === "live" ? "is-active" : ""}
-              disabled={keyConfigured === false}
+              disabled={!browserKey}
               onClick={() => setDataMode("live")}
               type="button"
             >
-              Dados Google <i />
+              Google ao vivo <i />
             </button>
           </div>
         </div>
@@ -530,21 +507,14 @@ export function AccessTwinApp() {
         <div className="finder-grid">
           <div className="reference-panel">
             <span className="field-label">Território de referência</span>
-            {dataMode === "live" ? (
-              <LivePlaceSearch
-                apiKey={browserKey}
-                onChange={(origin) => {
-                  setReferenceOrigin(origin);
-                  setLiveResult(undefined);
-                }}
-              />
-            ) : (
+            {dataMode === "demo" ? (
               <select
+                aria-label="Território de referência"
                 onChange={(event) => {
                   const territory = TERRITORIES.find(
                     (item) => item.id === event.target.value,
                   );
-                  if (territory) chooseTerritory(territory);
+                  if (territory) changeReference(territory);
                 }}
                 value={referenceTerritory.id}
               >
@@ -554,49 +524,42 @@ export function AccessTwinApp() {
                   </option>
                 ))}
               </select>
+            ) : (
+              <LivePlaceSearch
+                apiKey={browserKey}
+                onChange={setReferenceOrigin}
+              />
             )}
             <div className="reference-identity">
-              <span>REF</span>
+              <span>R</span>
               <div>
                 <strong>{referenceOrigin.label}</strong>
                 <small>
-                  {referenceOrigin.address
-                    ? referenceOrigin.address
-                    : `${referenceTerritory.city}, ${referenceTerritory.state}`}
+                  {dataMode === "demo"
+                    ? `${referenceTerritory.city} · ${referenceTerritory.state}`
+                    : referenceOrigin.address ?? "Referência ao vivo"}
                 </small>
               </div>
             </div>
-            <div className="quick-picks">
-              {TERRITORIES.slice(0, 6).map((territory) => (
-                <button
-                  className={
-                    territory.id === referenceTerritory.id ? "is-active" : ""
-                  }
-                  key={territory.id}
-                  onClick={() => chooseTerritory(territory)}
-                  type="button"
-                >
-                  {territory.label}
-                </button>
-              ))}
+            <div className="index-facts">
+              <span><strong>{demoIndex.length}</strong> territórios indexados</span>
+              <span><strong>8</strong> funções urbanas</span>
+              <span><strong>JS</strong> métrica principal</span>
             </div>
           </div>
 
           <div className="search-settings">
             <div>
-              <span className="field-label">Onde procurar semelhantes?</span>
+              <span className="field-label">Onde procurar os gêmeos</span>
               <ScopeControl
-                onChange={(nextScope) => {
-                  setScope(nextScope);
-                  setLiveResult(undefined);
-                }}
+                onChange={setScope}
                 stateCount={stateCount}
                 value={scope}
               />
             </div>
             <div className="mobility-row">
               <label>
-                <span className="field-label">Modo de acesso</span>
+                <span className="field-label">Deslocamento</span>
                 <select
                   onChange={(event) =>
                     setTravelMode(event.target.value as TravelMode)
@@ -611,7 +574,7 @@ export function AccessTwinApp() {
                 </select>
               </label>
               <label>
-                <span className="field-label">Janela de tempo</span>
+                <span className="field-label">Janela cotidiana</span>
                 <select
                   onChange={(event) =>
                     setDurationMinutes(Number(event.target.value))
@@ -629,162 +592,238 @@ export function AccessTwinApp() {
             {dataMode === "live" ? (
               <div className="cost-guard">
                 <div>
-                  <strong>Busca piloto com limite de custo</strong>
-                  <span>
-                    1 referência + {shortlist.length} candidatos próximos · até{" "}
-                    {liveAggregateCalls} consultas Places Aggregate
-                  </span>
+                  <span className="cost-kicker">CUSTO SOB CONTROLE</span>
+                  <strong>Busca piloto com confirmação</strong>
+                  <p>
+                    1 referência + {shortlist.length} candidatos · teto de{" "}
+                    {liveAggregateCalls} consultas Aggregate
+                  </p>
                 </div>
                 <button
                   disabled={loading || shortlist.length === 0}
                   onClick={() => void runLiveRanking()}
                   type="button"
                 >
-                  {loading ? "Analisando…" : "Confirmar busca ao vivo"}
+                  {loading ? "Analisando…" : "Confirmar busca"}
                 </button>
               </div>
             ) : (
               <div className="zero-cost">
-                <span>0</span>
+                <span>R$ 0</span>
                 <p>
-                  <strong>chamadas pagas</strong>
-                  O índice demonstrativo é calculado localmente.
+                  <strong>Busca instantânea no índice local</strong>
+                  Nenhuma API é chamada durante esta exploração.
                 </p>
               </div>
             )}
           </div>
         </div>
-
-        {error && (
-          <div className="error-banner" role="alert">
-            <strong>A busca não terminou.</strong> {error}
-          </div>
-        )}
+        {error && <div className="error-banner">{error}</div>}
       </section>
 
-      <section className="ranking" aria-live="polite">
+      <section className="ranking" id="resultados">
         <div className="section-heading section-heading--results">
           <div>
-            <span className="section-index">02 / RANKING</span>
-            <h2>Territórios mais afins</h2>
+            <span className="section-index">02 / GÊMEOS URBANOS</span>
+            <h2>As correspondências mais fortes</h2>
           </div>
           <p>
-            {activeResult.ranked.length} candidatos · {durationMinutes} min ·{" "}
-            {MODE_LABELS[travelMode]}
-            <span>
-              {activeResult.reference.analysis.source === "google"
-                ? "dados ao vivo"
-                : "índice demonstrativo"}
-            </span>
+            <span>{MODE_LABELS[travelMode]}</span>
+            {durationMinutes} min · {SCOPE_LABELS[scope].label} ·{" "}
+            {dataMode === "demo" ? TERRITORIAL_INDEX_VERSION : "Google ao vivo"}
           </p>
         </div>
 
-        {selectedTwin ? (
-          <div className="results-layout">
-            <div className="rank-list">
-              {activeResult.ranked.slice(0, 8).map((result) => (
-                <ResultCard
-                  key={result.id}
-                  onSelect={() => setSelectedId(result.id)}
-                  result={result}
-                  selected={selectedTwin.id === result.id}
-                />
-              ))}
+        {activeResults.length > 0 && activeReference ? (
+          <>
+            <div className="results-map-layout">
+              <TerritoryMap
+                onSelect={setSelectedId}
+                reference={activeReference.territory}
+                results={activeResults}
+                selectedId={selected?.id}
+              />
+              <div className="ranking-principle">
+                <span>REGRA DE ORDENAÇÃO</span>
+                <strong>Composição primeiro.</strong>
+                <p>
+                  Jensen–Shannon define a ordem. Densidade aparece como
+                  contexto, nunca como atalho para ultrapassar um perfil mais
+                  parecido.
+                </p>
+              </div>
             </div>
 
-            <aside className="twin-detail">
-              <span className="detail-label">Gêmeo urbano #{selectedTwin.rank}</span>
-              <div className="detail-score">
-                <strong>{Math.round(selectedTwin.similarity)}</strong>
-                <span>
-                  /100
-                  <small>afinidade de composição</small>
-                </span>
+            <div className="results-layout">
+              <div className="rank-list">
+                {activeResults.slice(0, 8).map((result, index) => {
+                  const similarity =
+                    "similarity" in result ? result.similarity : 0;
+                  const confidence =
+                    "confidence" in result ? result.confidence : "NORMAL";
+                  return (
+                    <button
+                      className={`rank-card ${
+                        selected?.id === result.id ? "is-selected" : ""
+                      }`}
+                      key={result.id}
+                      onClick={() => setSelectedId(result.id)}
+                      type="button"
+                    >
+                      <span className="rank-card__rank">
+                        {String(index + 1).padStart(2, "0")}
+                      </span>
+                      <span className="rank-card__place">
+                        <strong>{result.territory.label}</strong>
+                        <small>
+                          {result.territory.city} · {result.territory.state}
+                        </small>
+                      </span>
+                      <span className="rank-card__context">
+                        {result.territory.context}
+                      </span>
+                      <span className="rank-card__confidence">
+                        {CONFIDENCE_LABELS[confidence]}
+                      </span>
+                      <span className="rank-card__score">
+                        <strong>{numberFormat.format(similarity)}</strong>
+                        <small>afinidade JS</small>
+                      </span>
+                      <span className="rank-card__arrow">↗</span>
+                    </button>
+                  );
+                })}
               </div>
-              <h3>
-                {referenceOrigin.label}
-                <span>↔</span>
-                {selectedTwin.territory.label}
-              </h3>
-              <p>
-                O mix de funções urbanas é{" "}
-                <strong>
-                  {selectedTwin.similarity >= 85
-                    ? "muito próximo"
-                    : selectedTwin.similarity >= 70
-                      ? "consistente"
-                      : "parcialmente semelhante"}
-                </strong>
-                . A densidade relativa tem {Math.round(selectedTwin.scaleSimilarity)}
-                /100 de aderência.
-              </p>
-              <div className="profile-legend">
-                <span><i /> referência</span>
-                <span><i /> gêmeo</span>
-              </div>
-              <ProfileBars
-                reference={activeResult.reference}
-                twin={selectedTwin}
-              />
-              <div className="detail-note">
-                <strong>Por que não é apenas “o mais perto”?</strong>
-                <span>
-                  O ranking usa 82% de composição Jensen–Shannon e 18% de
-                  intensidade. Distância geográfica não entra no score.
-                </span>
-              </div>
-            </aside>
-          </div>
+
+              {selected && (
+                <aside className="twin-detail">
+                  <span className="detail-label">GÊMEO SELECIONADO</span>
+                  <div className="detail-score">
+                    <strong>{numberFormat.format(selectedSimilarity)}</strong>
+                    <span>%<small>afinidade de composição</small></span>
+                  </div>
+                  <h3>
+                    {activeReference.territory.label}
+                    <span>↔</span>
+                    {selected.territory.label}
+                  </h3>
+                  <p>
+                    Mesma lógica de distribuição entre as funções cotidianas.
+                    A intensidade relativa é mostrada separadamente.
+                  </p>
+                  <div className="profile-legend">
+                    <span><i /> referência</span>
+                    <span><i /> gêmeo</span>
+                  </div>
+                  <div className="profile-bars">
+                    {CATEGORIES.map((category) => {
+                      const referenceShare = profileShare(
+                        referenceCounts,
+                        category.id,
+                      );
+                      const twinShare = profileShare(
+                        selected.counts,
+                        category.id,
+                      );
+                      return (
+                        <div className="profile-line" key={category.id}>
+                          <span>{category.shortLabel}</span>
+                          <div>
+                            <i
+                              className="profile-line__reference"
+                              style={{ width: `${referenceShare}%` }}
+                            />
+                            <i
+                              className="profile-line__twin"
+                              style={{ width: `${twinShare}%` }}
+                            />
+                          </div>
+                          <small>
+                            {numberFormat.format(referenceShare)} /{" "}
+                            {numberFormat.format(twinShare)}
+                          </small>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div className="detail-metrics">
+                    <div>
+                      <span>INTENSIDADE</span>
+                      <strong>{numberFormat.format(selectedScale)}%</strong>
+                    </div>
+                    <div>
+                      <span>DENSIDADE</span>
+                      <strong>
+                        {numberFormat.format(selected.density)} / km²
+                      </strong>
+                    </div>
+                  </div>
+                  {"leadingDriver" in selected && selected.leadingDriver && (
+                    <div className="detail-note">
+                      <strong>Maior diferença</strong>
+                      <span>
+                        {CATEGORY_BY_ID[selected.leadingDriver].label} é a
+                        função que mais separa os dois perfis.
+                      </span>
+                    </div>
+                  )}
+                </aside>
+              )}
+            </div>
+          </>
         ) : (
           <div className="empty-result">
-            Não há outro território cadastrado neste recorte. Amplie a busca.
+            {dataMode === "live"
+              ? "Confirme a busca ao vivo para gerar o ranking."
+              : "Não há outro território neste recorte. Amplie a busca."}
           </div>
         )}
       </section>
 
       <section className="method" id="metodo">
         <div className="method-intro">
-          <span className="section-index">03 / MÉTODO</span>
-          <h2>O que torna dois territórios parecidos?</h2>
+          <span className="section-index">03 / MÉTODO ABERTO</span>
+          <h2>O score tem uma função — e um limite.</h2>
           <p>
-            Não é aparência, distância nem um palpite de IA. É a distribuição
-            relativa de oito funções que sustentam a vida cotidiana.
+            O AccessTwin não tenta dizer se um lugar é “melhor”. Ele responde
+            uma pergunta específica: quais territórios distribuem suas funções
+            cotidianas de maneira mais parecida?
           </p>
         </div>
         <div className="method-grid">
           <article>
             <span>01</span>
             <h3>Mesmo tempo</h3>
-            <p>Delimitamos o que cabe na mesma janela de deslocamento.</p>
+            <p>Comparamos áreas alcançáveis na mesma janela de deslocamento.</p>
           </article>
           <article>
             <span>02</span>
-            <h3>Mesmo vocabulário</h3>
-            <p>A oferta é organizada em oito funções urbanas comparáveis.</p>
+            <h3>Oito funções</h3>
+            <p>Comida, saúde, educação, cultura, mobilidade e vida cívica.</p>
           </article>
           <article>
             <span>03</span>
             <h3>Jensen–Shannon</h3>
-            <p>Comparamos distribuições e revelamos o que aproxima ou separa.</p>
+            <p>A métrica compara proporções e define integralmente a ordem.</p>
           </article>
           <article>
             <span>04</span>
-            <h3>Ranking explicável</h3>
-            <p>O resultado mostra afinidade, escala e principal divergência.</p>
+            <h3>Confiança visível</h3>
+            <p>Bases pequenas são sinalizadas e nunca fingem precisão.</p>
           </article>
         </div>
-        <p className="method-disclaimer">
-          No modo demonstrativo, os perfis são sintéticos e servem para validar
-          a experiência do produto. No modo Google, os resultados usam
-          isócronas e contagens ao vivo, com shortlist limitada para controlar
-          custo. O score não mede segurança, qualidade, preço ou preferência.
-        </p>
+        <div className="method-ledger">
+          <span>O QUE ENTRA</span>
+          <p>composição funcional · intensidade · área · fonte · data</p>
+          <span>O QUE NÃO ENTRA</span>
+          <p>segurança · preço · qualidade · preferência pessoal</p>
+        </div>
       </section>
 
       <footer>
         <a className="brand brand--footer" href="#top">
           <BrandMark />
-          <span><strong>AccessTwin</strong><small>urban affinity engine</small></span>
+          <span><strong>AccessTwin</strong><small>atlas de afinidades urbanas</small></span>
         </a>
         <p>Territórios diferentes. Cotidianos surpreendentemente próximos.</p>
         <span>Porto Alegre · 2026</span>

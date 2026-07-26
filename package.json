@@ -12,6 +12,7 @@
     "typecheck": "next typegen && tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "index:live": "node scripts/build-live-index.mjs",
     "check": "npm run lint && npm run typecheck && npm run test && npm run build:next && npm run build"
   },
   "dependencies": {
@@ -29,8 +30,8 @@
     "@vitejs/plugin-react": "^6.0.0",
     "@vitejs/plugin-rsc": "^0.5.26",
     "eslint": "^9.39.1",
-    "eslint-config-next": "16.2.11",
-    "next": "16.2.11",
+    "eslint-config-next": "16.2.12",
+    "next": "16.2.12",
     "react-server-dom-webpack": "19.2.8",
     "typescript": "5.9.3",
     "vinext": "1.0.0-beta.3",
@@ -41,6 +42,10 @@
   "packageManager": "npm@11.9.0",
   "engines": {
     "node": ">=22.0"
+  },
+  "overrides": {
+    "postcss": "8.5.23",
+    "sharp": "0.35.3"
   },
   "type": "module"
 }
