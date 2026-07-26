@@ -1,4 +1,7 @@
-import type { CategoryId } from "./types";
+import type {
+  CategoryId,
+  SimilarityConfidence,
+} from "./types";
 import { compareProfiles } from "./similarity";
 
 export type RankableProfile = {
@@ -13,7 +16,14 @@ export type RankedProfile<T extends RankableProfile> = T & {
   similarity: number;
   distance: number;
   scaleSimilarity: number;
+  /**
+   * Kept as an explicit field for clients that want to present an optional
+   * composition + intensity view. It never changes the primary rank.
+   */
   combinedScore: number;
+  confidence: SimilarityConfidence;
+  publishable: boolean;
+  warnings: readonly string[];
   leadingDriver?: CategoryId;
 };
 
@@ -40,6 +50,9 @@ export function rankProfiles<T extends RankableProfile>(
         distance: comparison.distance ?? 1,
         scaleSimilarity,
         combinedScore: similarity * 0.82 + scaleSimilarity * 0.18,
+        confidence: comparison.confidence,
+        publishable: comparison.publishable,
+        warnings: comparison.warnings,
         leadingDriver: [...comparison.contributions].sort(
           (left, right) => right.jsContribution - left.jsContribution,
         )[0]?.categoryId,
@@ -47,8 +60,9 @@ export function rankProfiles<T extends RankableProfile>(
     })
     .sort(
       (left, right) =>
-        right.combinedScore - left.combinedScore ||
+        Number(right.publishable) - Number(left.publishable) ||
         right.similarity - left.similarity ||
+        right.scaleSimilarity - left.scaleSimilarity ||
         left.id.localeCompare(right.id),
     )
     .map((candidate, index) => ({ ...candidate, rank: index + 1 }));

@@ -30,7 +30,7 @@ describe("rankProfiles", () => {
     expect(ranked[0].rank).toBe(1);
   });
 
-  it("uses density only as a secondary signal", () => {
+  it("keeps Jensen-Shannon composition as the primary ranking", () => {
     const ranked = rankProfiles(reference, [
       {
         id: "same-mix-other-scale",
@@ -48,5 +48,47 @@ describe("rankProfiles", () => {
 
     expect(ranked[0].id).toBe("same-mix-other-scale");
     expect(ranked[0].similarity).toBeCloseTo(100);
+  });
+
+  it("does not let density overturn a better composition match", () => {
+    const ranked = rankProfiles(reference, [
+      {
+        id: "exact-mix-different-density",
+        counts: { food_drink: 10, shopping_supply: 10 },
+        total: 20,
+        density: 1,
+      },
+      {
+        id: "close-mix-same-density",
+        counts: { food_drink: 52, shopping_supply: 48 },
+        total: 100,
+        density: 100,
+      },
+    ]);
+
+    expect(ranked[0].id).toBe("exact-mix-different-density");
+    expect(ranked[0].combinedScore).toBeLessThan(
+      ranked[1].combinedScore,
+    );
+  });
+
+  it("places insufficient profiles after publishable results", () => {
+    const ranked = rankProfiles(reference, [
+      {
+        id: "tiny-perfect",
+        counts: { food_drink: 4, shopping_supply: 4 },
+        total: 8,
+        density: 100,
+      },
+      {
+        id: "valid-close",
+        counts: { food_drink: 55, shopping_supply: 45 },
+        total: 100,
+        density: 100,
+      },
+    ]);
+
+    expect(ranked[0].id).toBe("valid-close");
+    expect(ranked[1].publishable).toBe(false);
   });
 });

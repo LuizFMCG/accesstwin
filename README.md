@@ -1,56 +1,90 @@
 # AccessTwin
 
-Motor exploratório de afinidade urbana. Em vez de pedir que a pessoa escolha
-dois lugares arbitrários, o produto recebe um território de referência e
-ranqueia automaticamente os territórios com composição funcional mais parecida.
+Atlas exploratório de afinidades urbanas. A pessoa escolhe um território de
+referência e o produto procura automaticamente, em todo o recorte disponível,
+os territórios cuja composição funcional é mais parecida.
 
-## Proposta de valor
+## Decisão metodológica
 
-1. delimitar o cotidiano alcançável sob o mesmo orçamento de tempo;
-2. organizar a oferta em oito funções urbanas comparáveis;
-3. medir proximidade entre distribuições com Jensen–Shannon;
-4. procurar e explicar os gêmeos urbanos no estado, país ou região.
-
-O ranking principal pondera:
+O ranking principal é determinado integralmente pela similaridade de composição
+Jensen–Shannon:
 
 ```text
-82% × similaridade de composição Jensen–Shannon
-+ 18% × aderência de densidade
+similaridade = 1 - distância Jensen–Shannon
 ```
 
-Distância geográfica não entra no score. O painel mantém composição, volume e
-densidade separados para não confundir “mesmo mix” com “mesma escala”.
+Densidade e volume aparecem como dimensões complementares. Eles explicam se
+dois lugares têm intensidade parecida, mas não alteram a ordem principal.
+Perfis com menos de dez observações são considerados insuficientes e aparecem
+depois dos resultados publicáveis.
 
-## Modos de dados
+## Índice territorial
 
-### Explorar sem custo
+O produto opera sobre um contrato de índice versionado:
 
-Compara localmente um catálogo de 22 territórios do Brasil, Argentina e Uruguai.
-Os perfis são sintéticos e determinísticos: validam o fluxo, a marca e a hipótese
-de produto, mas não descrevem empiricamente os bairros.
+- território, cidade, estado, país e coordenadas;
+- contagens nas oito funções urbanas;
+- total, área e densidade;
+- fonte, data de indexação, versão do índice e versão da taxonomia.
 
-### Google ao vivo
+O índice demonstrativo contém 22 territórios sintéticos e determinísticos do
+Brasil, Argentina e Uruguai. Ele valida interface, método e arquitetura sem
+custos de API; não descreve empiricamente esses bairros.
 
-Usa Google Maps Isochrones e Places Aggregate. Para impedir consumo acidental:
+`src/lib/territorial-index.ts` concentra a construção e a busca. A mesma forma
+de dados recebe futuramente perfis reais pré-calculados.
 
-- exige confirmação explícita antes da busca;
-- analisa uma referência e no máximo quatro candidatos por execução;
-- mostra o teto de chamadas antes da confirmação;
-- mantém cache em memória por 24 horas;
-- limita cada cliente a 12 análises em uma janela de 10 minutos.
+## Modo Google ao vivo
 
-O cache em memória é um guardrail de MVP, não um controle financeiro durável.
-Uma versão pública precisa de armazenamento persistente, autenticação, quotas no
-Google Cloud e um índice territorial pré-computado.
+O modo ao vivo usa Google Maps Isochrones e Places Aggregate. Ele continua sendo
+um piloto controlado, não uma varredura nacional. Cada busca:
 
-## Rodar localmente
+- exige confirmação;
+- analisa uma referência e no máximo quatro candidatos;
+- informa previamente o teto de chamadas;
+- aplica cache;
+- limita análises por cliente e por dia;
+- pode ser desligada imediatamente por variável de ambiente.
+
+Variáveis de proteção:
+
+```dotenv
+ACCESSTWIN_LIVE_ENABLED=true
+ACCESSTWIN_RATE_LIMIT=12
+ACCESSTWIN_DAILY_ANALYSIS_LIMIT=100
+ACCESSTWIN_CACHE_TTL_HOURS=24
+```
+
+Os limites da aplicação complementam, mas não substituem, budgets, alertas,
+restrições de chave e quotas configurados no Google Cloud. O contador em memória
+é uma última barreira do MVP; uma operação pública em múltiplas instâncias deve
+persistir uso e cache em um banco compartilhado.
+
+## Construir um índice real em lote
+
+O script de indexação chama uma instância local do AccessTwin, respeitando os
+mesmos controles da API. Ele nasce bloqueado e só roda com autorização explícita
+e um teto definido:
+
+```powershell
+$env:ACCESSTWIN_ALLOW_PAID_INDEX_BUILD = "YES"
+$env:ACCESSTWIN_INDEX_MAX_PROFILES = "5"
+$env:ACCESSTWIN_INDEX_DURATION_MINUTES = "15"
+$env:ACCESSTWIN_INDEX_TRAVEL_MODE = "WALK"
+npm run index:live
+```
+
+O arquivo gerado fica em `data/*.generated.json` e não é versionado
+automaticamente. Revise cobertura, custo, confiança e proveniência antes de
+promover qualquer índice.
+
+## Desenvolvimento
 
 ```powershell
 Set-Location D:\accesstwin
 Copy-Item .env.example .env.local
-# Preencha as chaves em .env.local para habilitar o modo ao vivo.
-& "C:\Program Files\nodejs\npm.cmd" ci
-& "C:\Program Files\nodejs\npm.cmd" run dev
+npm ci
+npm run dev
 ```
 
 Abra `http://127.0.0.1:3000`.
@@ -58,21 +92,16 @@ Abra `http://127.0.0.1:3000`.
 ## Verificação
 
 ```powershell
-& "C:\Program Files\nodejs\npm.cmd" run check
+npm run check
 ```
 
-Os testes cobrem a métrica, o ranking, a taxonomia, geometrias, contratos das
-APIs e a não exposição da chave de servidor.
+O fluxo executa lint, verificação de tipos, testes, build Next.js e build de
+hospedagem. Os testes cobrem métrica, ranking, confiança, índice territorial,
+taxonomia, geometrias, contratos das APIs e proteção da chave do servidor.
 
-## Limitações
+## O que o score não mede
 
-- O ranking demonstrativo usa perfis sintéticos.
-- A busca ao vivo é uma shortlist econômica, não uma varredura nacional.
-- A Isochrones API ainda é Preview e não oferece transporte público.
-- Cobertura e classificação dos Places não são uma auditoria completa.
-- Segurança, preço, qualidade, barreiras percebidas e preferência pessoal não
-  entram no score.
-
-O salto de produto seguinte é pré-calcular perfis reais de uma malha territorial
-ampla. Isso permite procurar o gêmeo mais similar no país sem multiplicar
-chamadas pagas a cada visita.
+O AccessTwin mede semelhança de composição funcional. Segurança, preço,
+qualidade, barreiras percebidas e preferência pessoal não entram no score. A
+Isochrones API ainda não oferece transporte público, e a classificação de
+Places não substitui uma auditoria territorial.

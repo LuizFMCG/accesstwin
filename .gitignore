@@ -12,5 +12,6 @@ next-env.d.ts
 /.wrangler/
 .env*
 !.env.example
+data/*.generated.json
 npm-debug.log*
 /accesstwin-*.png
